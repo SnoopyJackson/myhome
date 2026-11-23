@@ -64,9 +64,11 @@ button { cursor: pointer; }
 
 /* Tabs */
 .tabs { display: flex; gap: 4px; padding: 4px; background: var(--surface); border: 1px solid var(--line);
-  border-radius: 12px; width: 100%; max-width: 460px; margin-bottom: 22px; }
+  border-radius: 12px; width: 100%; margin-bottom: 12px; overflow-x: auto; }
 .tab { flex: 1; border: 0; background: transparent; padding: 10px 8px; border-radius: 9px; font-weight: 600; color: var(--muted); }
 .tab[aria-selected="true"] { background: var(--accent); color: var(--accent-ink); }
+.tab { white-space: nowrap; }
+.data-tools { display: flex; gap: 8px; margin-bottom: 22px; }
 
 /* Room chips */
 .grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(150px, 1fr)); gap: 12px; }
@@ -113,6 +115,15 @@ button { cursor: pointer; }
 .prio::before { content: ""; display: inline-block; width: 8px; height: 8px; border-radius: 50%; margin-right: 5px; background: currentColor; }
 .prio.haute { color: var(--hi); } .prio.moyenne { color: var(--mid); } .prio.basse { color: var(--lo); }
 .price { font-variant-numeric: tabular-nums; }
+.maintenance-list { display: grid; gap: 12px; }
+.maintenance-card { background: var(--surface); border: 1px solid var(--line); border-radius: 12px; padding: 14px; }
+.maintenance-card h3 { font-family: var(--font-head); font-size: 1.15rem; margin: 0; }
+.maintenance-card p { margin: 6px 0 0; }
+.maintenance-meta { display: flex; flex-wrap: wrap; gap: 4px 16px; color: var(--muted); font-size: .9rem; margin-top: 8px; }
+.maintenance-actions { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 12px; }
+.maintenance-card.overdue { border-left: 4px solid var(--hi); }
+.maintenance-card.soon { border-left: 4px solid var(--mid); }
+.maintenance-card.upcoming { border-left: 4px solid var(--lo); }
 
 /* Global views */
 .toolbar { display: flex; flex-wrap: wrap; align-items: center; gap: 12px 20px; margin-bottom: 14px; }
@@ -160,6 +171,12 @@ fieldset.field { border: 0; margin: 0; padding: 0; }
       <button class="tab" role="tab" data-action="view" data-view="rooms">Pièces</button>
       <button class="tab" role="tab" data-action="view" data-view="buy">À acheter</button>
       <button class="tab" role="tab" data-action="view" data-view="todo">Améliorations</button>
+      <button class="tab" role="tab" data-action="view" data-view="maintenance">Plan de maintenance</button>
+    </div>
+    <div class="data-tools" aria-label="Sauvegarde des données">
+      <button class="btn" type="button" data-action="export">Exporter JSON</button>
+      <button class="btn" type="button" data-action="import">Importer JSON</button>
+      <input id="importFile" type="file" accept=".json,application/json" hidden>
     </div>
   </header>
   <main id="main"></main>
@@ -193,6 +210,28 @@ fieldset.field { border: 0; margin: 0; padding: 0; }
   </form>
 </dialog>
 
+<dialog id="maintenanceDlg" aria-labelledby="maintenance-title">
+  <form class="dlg" id="maintenanceForm">
+    <h2 id="maintenance-title">Ajouter une maintenance</h2>
+    <label class="field"><span>Équipement</span><input type="text" name="equipment" required maxlength="100" placeholder="Pompe à chaleur"></label>
+    <label class="field"><span>Action à faire / modification</span><input type="text" name="title" required maxlength="140" placeholder="Entretien annuel"></label>
+    <div class="row2">
+      <label class="field"><span>Dernière réalisation</span><input type="date" name="lastDate"></label>
+      <label class="field"><span>Prochaine échéance</span><input type="date" name="nextDate"></label>
+    </div>
+    <div class="row2">
+      <label class="field"><span>Répéter tous les</span><input type="number" name="interval" min="1" max="999" step="1" placeholder="12"></label>
+      <label class="field"><span>Unité</span><select name="intervalUnit"><option value="months">Mois</option><option value="years">Ans</option><option value="days">Jours</option></select></label>
+    </div>
+    <label class="field"><span>Notes</span><textarea name="note" maxlength="600" placeholder="Prestataire, référence, détails…"></textarea></label>
+    <div class="actions">
+      <button type="button" class="btn danger" id="maintenanceDelete">Supprimer</button>
+      <button type="button" class="btn" id="maintenanceCancel">Annuler</button>
+      <button type="submit" class="btn primary">Enregistrer</button>
+    </div>
+  </form>
+</dialog>
+
 <script>
 (function () {
   "use strict";
@@ -221,6 +260,7 @@ fieldset.field { border: 0; margin: 0; padding: 0; }
   var DOC = "tracker/main";
 
   var items = [];
+  var maintenance = [];
   var ui = { view: "rooms", room: null, showDone: false, prio: "all" };
   var db = null, syncTimer = null, syncState = "local";
 
@@ -229,6 +269,8 @@ fieldset.field { border: 0; margin: 0; padding: 0; }
   var $status = document.getElementById("status");
   var $dlg = document.getElementById("dlg");
   var $form = document.getElementById("form");
+  var $maintenanceDlg = document.getElementById("maintenanceDlg");
+  var $maintenanceForm = document.getElementById("maintenanceForm");
   var eur = new Intl.NumberFormat("fr-FR", { style: "currency", currency: "EUR", maximumFractionDigits: 0 });
   var eur2 = new Intl.NumberFormat("fr-FR", { style: "currency", currency: "EUR" });
   function money(n) { return (n % 1 === 0 ? eur : eur2).format(n); }
@@ -243,17 +285,24 @@ fieldset.field { border: 0; margin: 0; padding: 0; }
 
   /* ---------- Storage ---------- */
   function readLocal() {
-    try { var v = JSON.parse(localStorage.getItem(LS_KEY) || "null"); if (v && Array.isArray(v.items)) return v.items; } catch (e) {}
+    try {
+      var v = JSON.parse(localStorage.getItem(LS_KEY) || "null");
+      if (v && Array.isArray(v.items)) {
+        maintenance = Array.isArray(v.maintenance) ? v.maintenance : [];
+        return v.items;
+      }
+    } catch (e) {}
+    maintenance = [];
     return [];
   }
   function writeLocal() {
-    try { localStorage.setItem(LS_KEY, JSON.stringify({ items: items })); return true; } catch (e) { return false; }
+    try { localStorage.setItem(LS_KEY, JSON.stringify({ items: items, maintenance: maintenance })); return true; } catch (e) { return false; }
   }
   function pushDb() {
     if (!db) return;
     clearTimeout(syncTimer);
     syncTimer = setTimeout(function () {
-      db.doc(DOC).set({ items: items, updated: Date.now() }).then(function () {
+      db.doc(DOC).set({ items: items, maintenance: maintenance, updated: Date.now() }).then(function () {
         syncState = "sync"; renderStatus();
       }).catch(function () { syncState = "local"; renderStatus(); });
     }, 400);
@@ -271,8 +320,12 @@ fieldset.field { border: 0; margin: 0; padding: 0; }
       if (!db) return;
       var snap = await db.doc(DOC).get();
       if (snap.exists && snap.data() && Array.isArray(snap.data().items)) {
-        items = snap.data().items; writeLocal(); render();
-      } else if (items.length) { pushDb(); }
+        var remote = snap.data();
+        items = remote.items;
+        if (Array.isArray(remote.maintenance)) maintenance = remote.maintenance;
+        else if (maintenance.length) pushDb();
+        writeLocal(); render();
+      } else if (items.length || maintenance.length) { pushDb(); }
       syncState = "sync"; renderStatus();
     } catch (e) { db = null; }
   }
@@ -285,6 +338,19 @@ fieldset.field { border: 0; margin: 0; padding: 0; }
   }
   function forRoom(id, type) { return items.filter(function (i) { return i.room === id && (!type || i.type === type); }).sort(sortItems); }
   function remainingBudget(list) { return list.reduce(function (s, i) { return s + (!i.done && i.type === "buy" ? (+i.price || 0) : 0); }, 0); }
+  function localDateString(date) {
+    var y = date.getFullYear(), m = String(date.getMonth() + 1).padStart(2, "0"), d = String(date.getDate()).padStart(2, "0");
+    return y + "-" + m + "-" + d;
+  }
+  function nextMaintenanceDate(entry, fromDate) {
+    var date = new Date(fromDate + "T12:00:00");
+    var interval = parseInt(entry.interval, 10);
+    if (!entry.interval || !interval || isNaN(date.getTime())) return "";
+    if (entry.intervalUnit === "years") date.setFullYear(date.getFullYear() + interval);
+    else if (entry.intervalUnit === "days") date.setDate(date.getDate() + interval);
+    else date.setMonth(date.getMonth() + interval);
+    return localDateString(date);
+  }
 
   /* ---------- Rendering ---------- */
   function renderFigures() {
@@ -293,6 +359,7 @@ fieldset.field { border: 0; margin: 0; padding: 0; }
     $figs.innerHTML =
       '<div class="fig"><b>' + buy.length + '</b><span>à acheter</span></div>' +
       '<div class="fig"><b>' + todo.length + '</b><span>améliorations à faire</span></div>' +
+      '<div class="fig"><b>' + maintenance.length + '</b><span>maintenances planifiées</span></div>' +
       '<div class="fig"><b>' + money(remainingBudget(items)) + '</b><span>budget restant estimé</span></div>';
   }
   function renderTabs() {
@@ -370,9 +437,97 @@ fieldset.field { border: 0; margin: 0; padding: 0; }
     }
     $main.innerHTML = html;
   }
+  function formatDate(value) {
+    if (!value) return "Non renseignée";
+    var date = new Date(value + "T12:00:00");
+    return isNaN(date.getTime()) ? "Non renseignée" : new Intl.DateTimeFormat("fr-FR").format(date);
+  }
+  function renderMaintenance() {
+    var today = localDateString(new Date());
+    var sorted = maintenance.slice().sort(function (a, b) {
+      return (a.nextDate || "9999-12-31").localeCompare(b.nextDate || "9999-12-31");
+    });
+    var cards = sorted.map(function (entry) {
+      var state = entry.nextDate && entry.nextDate < today ? "overdue" : (entry.nextDate && entry.nextDate <= localDateString(new Date(Date.now() + 30 * 86400000)) ? "soon" : "upcoming");
+      var intervalLabel = entry.interval ? "Tous les " + entry.interval + " " + ({ days: "jour(s)", months: "mois", years: "an(s)" }[entry.intervalUnit] || "mois") : "Sans répétition définie";
+      return '<article class="maintenance-card ' + state + '"><h3>' + esc(entry.equipment) + ' — ' + esc(entry.title) + '</h3>' +
+        (entry.note ? '<p>' + esc(entry.note) + '</p>' : '') +
+        '<div class="maintenance-meta"><span>Dernière fois : ' + formatDate(entry.lastDate) + '</span><span>Prochaine : ' + formatDate(entry.nextDate) + '</span><span>' + esc(intervalLabel) + '</span></div>' +
+        '<div class="maintenance-actions"><button class="btn primary" data-action="maintenance-done" data-id="' + esc(entry.id) + '">Marquer comme effectué</button>' +
+        '<button class="btn" data-action="maintenance-edit" data-id="' + esc(entry.id) + '">Modifier</button></div></article>';
+    }).join("");
+    $main.innerHTML = '<div class="toolbar"><strong>Entretiens, contrôles et modifications à planifier</strong><button class="btn primary" data-action="maintenance-add">Ajouter une tâche</button></div>' +
+      (cards ? '<div class="maintenance-list">' + cards + '</div>' : '<p class="empty">Aucune maintenance planifiée. Ajoutez par exemple l’entretien annuel de la pompe à chaleur.</p>');
+  }
   function render() {
     renderFigures(); renderTabs();
-    if (ui.view === "rooms") { ui.room ? renderRoom() : renderRooms(); } else { renderGlobal(); }
+    if (ui.view === "rooms") { ui.room ? renderRoom() : renderRooms(); }
+    else if (ui.view === "maintenance") renderMaintenance();
+    else renderGlobal();
+  }
+
+  /* ---------- Maintenance planner ---------- */
+  var editingMaintenanceId = null;
+  function openMaintenanceDialog(id) {
+    var entry = id ? maintenance.filter(function (m) { return m.id === id; })[0] : null;
+    editingMaintenanceId = entry ? entry.id : null;
+    document.getElementById("maintenance-title").textContent = entry ? "Modifier la maintenance" : "Ajouter une maintenance";
+    document.getElementById("maintenanceDelete").hidden = !entry;
+    $maintenanceForm.reset();
+    $maintenanceForm.equipment.value = entry ? entry.equipment : "";
+    $maintenanceForm.title.value = entry ? entry.title : "";
+    $maintenanceForm.lastDate.value = entry ? (entry.lastDate || "") : "";
+    $maintenanceForm.nextDate.value = entry ? (entry.nextDate || "") : "";
+    $maintenanceForm.interval.value = entry ? (entry.interval || "") : "";
+    $maintenanceForm.intervalUnit.value = entry ? (entry.intervalUnit || "months") : "months";
+    $maintenanceForm.note.value = entry ? (entry.note || "") : "";
+    $maintenanceDlg.showModal();
+    setTimeout(function () { $maintenanceForm.equipment.focus(); }, 0);
+  }
+  document.getElementById("maintenanceCancel").addEventListener("click", function () { $maintenanceDlg.close(); });
+  document.getElementById("maintenanceDelete").addEventListener("click", function () {
+    if (!editingMaintenanceId || !window.confirm("Supprimer cette tâche de maintenance ?")) return;
+    maintenance = maintenance.filter(function (m) { return m.id !== editingMaintenanceId; });
+    save(); $maintenanceDlg.close(); render();
+  });
+  $maintenanceDlg.addEventListener("click", function (e) { if (e.target === $maintenanceDlg) $maintenanceDlg.close(); });
+  $maintenanceForm.addEventListener("submit", function (e) {
+    e.preventDefault();
+    var data = {
+      equipment: $maintenanceForm.equipment.value.trim(), title: $maintenanceForm.title.value.trim(),
+      lastDate: $maintenanceForm.lastDate.value, nextDate: $maintenanceForm.nextDate.value,
+      interval: $maintenanceForm.interval.value ? parseInt($maintenanceForm.interval.value, 10) : 0,
+      intervalUnit: $maintenanceForm.intervalUnit.value, note: $maintenanceForm.note.value.trim()
+    };
+    if (editingMaintenanceId) maintenance.forEach(function (m) { if (m.id === editingMaintenanceId) Object.assign(m, data); });
+    else maintenance.push(Object.assign({ id: uid(), created: Date.now() }, data));
+    save(); $maintenanceDlg.close(); render();
+  });
+
+  /* ---------- JSON backup and restore ---------- */
+  function exportJson() {
+    var data = { format: "suivi-maison", version: 2, exportedAt: new Date().toISOString(), items: items, maintenance: maintenance };
+    var blob = new Blob([JSON.stringify(data, null, 2)], { type: "application/json" });
+    var url = URL.createObjectURL(blob), link = document.createElement("a");
+    link.href = url; link.download = "suivi-maison-backup-" + localDateString(new Date()) + ".json";
+    document.body.appendChild(link); link.click(); link.remove(); URL.revokeObjectURL(url);
+    $status.textContent = "Sauvegarde JSON téléchargée.";
+  }
+  function importJson(file) {
+    var reader = new FileReader();
+    reader.onload = function () {
+      try {
+        var data = JSON.parse(reader.result);
+        if (!data || !Array.isArray(data.items) || (data.maintenance !== undefined && !Array.isArray(data.maintenance))) throw new Error("Format invalide");
+        if (!window.confirm("Importer cette sauvegarde remplacera les données actuelles de l’application. Continuer ?")) return;
+        items = data.items;
+        maintenance = Array.isArray(data.maintenance) ? data.maintenance : [];
+        save(); render();
+        window.alert("Import terminé. Les données importées sont enregistrées sur cet appareil.");
+      } catch (e) { window.alert("Impossible d’importer ce fichier. Choisissez un fichier JSON exporté depuis Suivi maison."); }
+    };
+    reader.onerror = function () { window.alert("Le fichier n’a pas pu être lu."); };
+    reader.readAsText(file);
   }
 
   /* ---------- Dialog ---------- */
@@ -436,8 +591,25 @@ fieldset.field { border: 0; margin: 0; padding: 0; }
     else if (a === "home") { ui.room = null; render(); }
     else if (a === "add") { openDialog({ room: el.dataset.room, type: el.dataset.type }); }
     else if (a === "edit") { openDialog({ id: el.dataset.id }); }
+    else if (a === "maintenance-add") openMaintenanceDialog();
+    else if (a === "maintenance-edit") openMaintenanceDialog(el.dataset.id);
+    else if (a === "maintenance-done") {
+      var entry = maintenance.filter(function (m) { return m.id === el.dataset.id; })[0];
+      if (entry) {
+        entry.lastDate = localDateString(new Date());
+        entry.nextDate = nextMaintenanceDate(entry, entry.lastDate) || entry.nextDate;
+        save(); render();
+      }
+    }
+    else if (a === "export") exportJson();
+    else if (a === "import") document.getElementById("importFile").click();
   });
   document.addEventListener("change", function (e) {
+    if (e.target.id === "importFile") {
+      if (e.target.files && e.target.files[0]) importJson(e.target.files[0]);
+      e.target.value = "";
+      return;
+    }
     var el = e.target.closest("[data-action]");
     if (!el) return;
     var a = el.dataset.action;
